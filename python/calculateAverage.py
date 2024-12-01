@@ -2,9 +2,8 @@ import sys
 import multiprocessing as mp
 
 MEASUREMENT_FILE = "data/measurements.txt"
-MEASUREMENT_COUNT = 1_000_000_000
-CORE_MULTIPLIER = 4
-CHUNK_MULTIPLIER = 4
+CHUNK_SIZE = 2 * 1024 * 1024
+CORE_MULTIPLIER = 2
 N_CORES = mp.cpu_count() * CORE_MULTIPLIER
 
 class Station:
@@ -32,32 +31,27 @@ def read_file_in_chunks(filename, chunk_size):
         while chunk := file.readlines(chunk_size):
             yield chunk
 
-def worker(input_queue, output_queue):
-    stations = {}
-    while chunk := input_queue.get():
+def worker(input_queue, shared_dict, lock):
+    while True:
+        chunk = input_queue.get()
+        if chunk is None:
+            break
+        
+        local_dict = {}
+        
         for line in chunk:
             key, value = line.split(";")
             value = float(value)
-            if key not in stations:
-                stations[key] = Station(key)
-            stations[key].observe(value)
-    for station in stations.values():
-        output_queue.put(station)
-    output_queue.put(None)
-
-def collector(output_queue):
-    stations = {}
-    finished_workers = 0
-    while finished_workers < N_CORES:
-        station = output_queue.get()
-        if station is None:
-            finished_workers += 1
-        else:
-            if station.name not in stations:
-                stations[station.name] = station
-            else:
-                stations[station.name].combine(station)
-    return stations
+            if key not in local_dict:
+                local_dict[key] = Station(key)
+            local_dict[key].observe(value)
+        
+        with lock:
+            for key, station in local_dict.items():
+                if key not in shared_dict:
+                    shared_dict[key] = station
+                else:
+                    shared_dict[key].combine(station)
 
 def produce_chunks(input_queue, filename, chunk_size):
     for chunk in read_file_in_chunks(filename, chunk_size):
@@ -66,27 +60,28 @@ def produce_chunks(input_queue, filename, chunk_size):
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding='utf-8')
 
-    chunk_size = MEASUREMENT_COUNT // (N_CORES * CHUNK_MULTIPLIER)
     input_queue = mp.Queue()
-    output_queue = mp.Queue()
+    with mp.Manager() as manager:
+        shared_dict = manager.dict()
+        lock = manager.Lock()
 
-    processes = [mp.Process(target=worker, args=(input_queue, output_queue)) for _ in range(N_CORES)]
-    for p in processes:
-        p.start()
+        processes = [mp.Process(target=worker, args=(input_queue, shared_dict, lock)) for _ in range(N_CORES)]
+        for p in processes:
+            p.start()
 
-    producer = mp.Process(target=produce_chunks, args=(input_queue, MEASUREMENT_FILE, chunk_size))
-    producer.start()
-    producer.join()
+        producer = mp.Process(target=produce_chunks, args=(input_queue, MEASUREMENT_FILE, CHUNK_SIZE))
+        producer.start()
 
-    for _ in range(N_CORES):
-        input_queue.put(None)
+        producer.join()
 
-    stations = collector(output_queue)
-    for p in processes:
-        p.join()
+        for _ in range(N_CORES):
+            input_queue.put(None)
 
-    results = [
-        f"{station.name};{station.min_value};{station.sum_value / station.count:.1f};{station.max_value}"
-        for station in sorted(stations.values(), key=lambda s: s.name)
-    ]
-    print("{" + ",".join(results) + "}")
+        for p in processes:
+            p.join()
+
+        results = [
+            f"{station.name};{station.min_value};{station.sum_value / station.count:.1f};{station.max_value}"
+            for station in sorted(shared_dict.values(), key=lambda s: s.name)
+        ]
+        print("{" + ",".join(results) + "}")
