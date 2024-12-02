@@ -2,6 +2,7 @@ import sys
 import multiprocessing as mp
 
 MEASUREMENT_FILE = "data/measurements.txt"
+BUFFER_SIZE = 2 * 1024 * 1024
 CHUNK_SIZE = 2 * 1024 * 1024
 CORE_MULTIPLIER = 2
 N_CORES = mp.cpu_count() * CORE_MULTIPLIER
@@ -27,7 +28,7 @@ class Station:
         self.count += other.count
 
 def read_file_in_chunks(filename, chunk_size):
-    with open(filename, "rt", encoding="utf8") as file:
+    with open(filename, "rt", encoding="utf8", buffering=BUFFER_SIZE) as file:
         while chunk := file.readlines(chunk_size):
             yield chunk
 
